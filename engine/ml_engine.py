@@ -4,7 +4,7 @@ Lead scoring, churn prediction, message grading, anomaly detection
 """
 
 import numpy as np
-import pandas as pd
+#import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import json
