@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import asyncio
 from functools import lru_cache
-import pandas as pd
+#import pandas as pd
 
 class FirebaseClient:
     """Singleton Firebase client with caching and connection management"""
