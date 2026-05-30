@@ -28,17 +28,17 @@ FIREBASE_COLLECTIONS = [
 
 # ========== GEMINI CONFIG ==========
 GEMINI_API_KEYS = [
-    "AIzaSyBnICPKAzFJ4zc4mROB5k5rf0QdwUgM9Nc",
-    "AIzaSyD-6AV_aHljhGwcyk_5jg1EEU1XxCYSUPU",
-    "AIzaSyDZWlTSQbFRV_6C5JemPaI_H_b1VLhJQaY",
-    "AIzaSyDYwR4Jc_Pdrt4Qf5Uah3LdKIDKe2mH5hI",
-    "AIzaSyDxbB1CYSg-97iyNfi2Gx_hCnvhvNqHRPk"
+    os.environ.get("GEMINI_KEY_1", ""),
+    os.environ.get("GEMINI_KEY_2", ""),
+    os.environ.get("GEMINI_KEY_3", ""),
+    os.environ.get("GEMINI_KEY_4", ""),
+    os.environ.get("GEMINI_KEY_5", "")
 ]
 GEMINI_MODEL_FLASH = "gemini-2.5-flash"
 GEMINI_MODEL_PRO = "gemini-2.5-pro"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
-# ========== PRICING ==========
+# ========== PRICING ===
 PRICING_TIERS = {
     "standard": 19,
     "pro": 39,
