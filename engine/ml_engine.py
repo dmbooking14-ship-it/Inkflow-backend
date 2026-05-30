@@ -1,21 +1,22 @@
+
 """
 InkFlow Machine Learning Engine
-Lead scoring, churn prediction, message grading, anomaly detection
+ML features temporarily disabled — will be re-enabled with dependencies
 """
 
-import numpy as np
-#import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-import json
+# import numpy as np
+# import pandas as pd
+# from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+# from sklearn.linear_model import LogisticRegression
+# from sklearn.preprocessing import StandardScaler, LabelEncoder
+# from sklearn.model_selection import train_test_split
+# from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+# from xgboost import XGBClassifier
 import pickle
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from xgboost import XGBClassifier
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
