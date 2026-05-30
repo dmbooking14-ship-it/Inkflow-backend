@@ -1,7 +1,7 @@
 fastapi==0.109.0
 uvicorn==0.27.0
 firebase-admin==6.3.0
-pandas==2.1.4
+pandas==2.2.3
 numpy==1.26.3
 scikit-learn==1.4.0
 xgboost==2.0.3
