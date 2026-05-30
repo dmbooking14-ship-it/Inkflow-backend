@@ -4,7 +4,7 @@ InkFlow Machine Learning Engine
 ML features temporarily disabled — will be re-enabled with dependencies
 """
 
-# import numpy as np
+import numpy as np
 # import pandas as pd
 # from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 # from sklearn.linear_model import LogisticRegression
