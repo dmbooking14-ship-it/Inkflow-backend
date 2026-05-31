@@ -1,6 +1,3 @@
-
-
-```python
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -12,14 +9,9 @@ class Analyzer:
     # ========== LEAD SCORING ==========
     @staticmethod
     def score_lead(artist: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Score a lead based on followers, booking method, status, and activity.
-        Returns score 0-1 and quality tier.
-        """
         score = 0.0
         reasons = []
 
-        # Followers signal
         followers = artist.get("followers", 0) or 0
         if followers > 10000:
             score += 0.25
@@ -31,7 +23,6 @@ class Analyzer:
             score += 0.10
             reasons.append("1k+ followers")
 
-        # Booking method — DM-based artists have more pain
         booking_method = (artist.get("booking_method") or "").lower()
         if "dm" in booking_method:
             score += 0.25
@@ -40,7 +31,6 @@ class Analyzer:
             score += 0.15
             reasons.append("books via WhatsApp")
 
-        # Status — not contacted yet means fresh opportunity
         status = (artist.get("status") or "").lower()
         if "identified_not_contacted" in status:
             score += 0.15
@@ -49,22 +39,18 @@ class Analyzer:
             score += 0.05
             reasons.append("needs follow-up")
 
-        # Priority
         priority = (artist.get("priority") or "").lower()
         if priority == "high":
             score += 0.15
             reasons.append("marked high priority")
 
-        # Notes indicate pain point
         notes = (artist.get("notes") or "").lower()
         if "pain" in notes or "overwhelmed" in notes or "double" in notes:
             score += 0.10
             reasons.append("has clear pain point")
 
-        # Cap at 1.0
         score = min(score, 1.0)
 
-        # Quality tier
         if score >= 0.7:
             quality = "Excellent"
         elif score >= 0.5:
@@ -83,16 +69,11 @@ class Analyzer:
     # ========== CHURN PREDICTION ==========
     @staticmethod
     def predict_churn(artist: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Predict churn risk based on status, trial expiry, and activity.
-        Returns risk level and factors.
-        """
         risk_score = 0.0
         factors = []
 
         status = (artist.get("status") or "").lower()
 
-        # Expired = already churned
         if status == "expired":
             return {
                 "risk": "High",
@@ -101,7 +82,6 @@ class Analyzer:
                 "action": "Re-engage with special offer or feedback request",
             }
 
-        # Trial ending soon
         if status == "trial":
             trial_end = artist.get("trialEndsAt")
             if trial_end:
@@ -118,7 +98,6 @@ class Analyzer:
                 except (ValueError, TypeError):
                     pass
 
-        # No recent activity
         last_active = artist.get("lastActiveAt")
         if last_active:
             try:
@@ -134,17 +113,14 @@ class Analyzer:
             except (ValueError, TypeError):
                 pass
         else:
-            # No activity record at all
             risk_score += 0.1
             factors.append("No activity recorded")
 
-        # No bookings
         booking_count = artist.get("bookingCount", 0) or 0
         if booking_count == 0:
             risk_score += 0.15
             factors.append("No bookings made")
 
-        # Determine risk level
         risk_score = min(risk_score, 1.0)
         if risk_score >= 0.6:
             risk = "High"
@@ -166,16 +142,11 @@ class Analyzer:
     # ========== MESSAGE GRADING ==========
     @staticmethod
     def grade_message(message: str) -> Dict[str, Any]:
-        """
-        Grade an outreach message based on length, personalization, questions, and spam triggers.
-        Returns grade A-F with suggestions.
-        """
         score = 0
         suggestions = []
         lower = message.lower()
         length = len(message)
 
-        # Length scoring
         if 100 <= length <= 350:
             score += 2
         elif 50 <= length < 100:
@@ -187,7 +158,6 @@ class Analyzer:
             score -= 1
             suggestions.append("Message is long — try to keep under 350 characters")
 
-        # Personalization
         personalization_markers = [
             "saw your", "noticed your", "your work", "your style",
             "your post", "your recent", "you posted", "your portfolio",
@@ -198,7 +168,6 @@ class Analyzer:
         else:
             suggestions.append("Mention something specific about their work or recent post")
 
-        # Question engagement
         question_count = message.count("?")
         if question_count >= 2:
             score += 1
@@ -208,7 +177,6 @@ class Analyzer:
         else:
             suggestions.append("Include a question to start a conversation")
 
-        # No-pressure language
         no_pressure_markers = [
             "no pressure", "no worries", "either way", "if curious",
             "whenever", "no rush",
@@ -216,7 +184,6 @@ class Analyzer:
         if any(m in lower for m in no_pressure_markers):
             score += 1
 
-        # Spam triggers — penalize heavily
         spam_triggers = [
             "act now", "limited time", "don't miss out", "exclusive offer",
             "guaranteed", "free money", "click here", "buy now",
@@ -227,12 +194,10 @@ class Analyzer:
             score -= len(spam_hits) * 2
             suggestions.append(f"Avoid spam triggers: {', '.join(spam_hits)}")
 
-        # Link penalty (too salesy if early)
         if "http" in lower or "link" in lower:
             score -= 1
             suggestions.append("Consider removing the link on first contact — build rapport first")
 
-        # Determine grade
         if score >= 6:
             grade = "A"
         elif score >= 4:
@@ -258,13 +223,9 @@ class Analyzer:
         bookings: List[Dict[str, Any]],
         email_used: int = 0,
     ) -> List[Dict[str, Any]]:
-        """
-        Detect anomalies: no bookings in 48h, email usage >80%, no signups in 7 days.
-        """
         anomalies = []
         now = datetime.now(timezone.utc)
 
-        # Check for no bookings in last 48 hours
         recent_bookings = 0
         cutoff_48h = now - timedelta(hours=48)
         for b in bookings:
@@ -290,7 +251,6 @@ class Analyzer:
                 "recommendedAction": "Check if booking links are working. Reach out to active artists for feedback.",
             })
 
-        # Check email usage
         email_percent = min(100, round((email_used / 200) * 100))
         if email_percent > 80:
             anomalies.append({
@@ -300,7 +260,6 @@ class Analyzer:
                 "recommendedAction": "Reduce non-critical emails. Plan for next month's quota or upgrade.",
             })
 
-        # Check no signups in 7 days
         recent_signups = 0
         cutoff_7d = now - timedelta(days=7)
         for a in artists:
@@ -331,13 +290,9 @@ class Analyzer:
     # ========== COHORT ANALYSIS ==========
     @staticmethod
     def analyze_cohorts(artists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Group artists by signup week, calculate retention per cohort.
-        """
         if not artists:
             return []
 
-        # Group by signup week
         cohorts: Dict[str, List[Dict]] = {}
         for a in artists:
             created = a.get("createdAt")
@@ -383,19 +338,13 @@ class Analyzer:
         artists: List[Dict[str, Any]],
         outreach_logs: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """
-        Calculate conversion rates: DM → Reply → Signup → Active → Paid.
-        """
-        # Count from outreach logs
         dms_sent = sum(1 for o in outreach_logs if o.get("action") == "dm_sent")
         replies = sum(1 for o in outreach_logs if o.get("action") == "reply_received")
 
         total = len(artists)
         active = sum(1 for a in artists if a.get("status") == "active")
         trial = sum(1 for a in artists if a.get("status") == "trial")
-        expired = sum(1 for a in artists if a.get("status") == "expired")
 
-        # Rates
         dm_to_reply = round((replies / dms_sent) * 100, 1) if dms_sent > 0 else 0
         reply_to_signup = round((total / replies) * 100, 1) if replies > 0 else 0
         signup_to_active = round((active / (active + trial)) * 100, 1) if (active + trial) > 0 else 0
@@ -417,14 +366,9 @@ class Analyzer:
     # ========== TREND DETECTION ==========
     @staticmethod
     def detect_trends(daily_snapshots: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Simple linear regression on metric trajectories using numpy.
-        Requires at least 3 data points.
-        """
         if len(daily_snapshots) < 3:
             return {"message": "Not enough data for trend detection (need 3+ snapshots)", "trends": {}}
 
-        # Sort by date ascending
         sorted_snapshots = sorted(
             daily_snapshots,
             key=lambda s: s.get("createdAt", ""),
@@ -449,7 +393,6 @@ class Analyzer:
             y = np.array(values, dtype=float)
 
             try:
-                # Linear regression: y = slope * x + intercept
                 slope, intercept = np.polyfit(x, y, 1)
                 current = values[-1]
                 previous = values[-2] if len(values) >= 2 else current
@@ -478,9 +421,6 @@ class Analyzer:
     # ========== CORRELATION DISCOVERY ==========
     @staticmethod
     def discover_correlations(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Find correlations between metric pairs using numpy.
-        """
         if len(snapshots) < 5:
             return []
 
@@ -525,14 +465,10 @@ class Analyzer:
         honeypot_logs: List[Dict[str, Any]],
         snapshots: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """
-        Complete dashboard analysis matching frontend metrics exactly.
-        """
         now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
         month_ago = now - timedelta(days=30)
 
-        # --- Artists ---
         total = len(artists)
         active = sum(1 for a in artists if a.get("status") == "active")
         trial = sum(1 for a in artists if a.get("status") == "trial")
@@ -551,7 +487,6 @@ class Analyzer:
         )
         mrr = (standard * 19) + (pro * 39) + (premium * 59)
 
-        # New signups in 7 days
         new_signups_7d = 0
         for a in artists:
             created = a.get("createdAt")
@@ -568,7 +503,6 @@ class Analyzer:
                 except (ValueError, TypeError, AttributeError):
                     pass
 
-        # --- Bookings ---
         total_bookings = len(bookings)
         approved_b = sum(1 for b in bookings if b.get("status") == "approved")
         pending_b = sum(1 for b in bookings if not b.get("status") or b.get("status") == "pending")
@@ -593,7 +527,6 @@ class Analyzer:
                 except (ValueError, TypeError, AttributeError):
                     pass
 
-        # --- Outreach ---
         outreach_recent = []
         for o in outreach_logs:
             created = o.get("createdAt")
@@ -614,11 +547,9 @@ class Analyzer:
         replies = sum(1 for o in outreach_recent if o.get("action") == "reply_received")
         reply_rate = round((replies / dms_sent) * 100) if dms_sent > 0 else 0
 
-        # --- Conversion & Churn ---
         conversion_rate = round((active / (trial + active)) * 100) if (trial + active) > 0 else 0
         churn_rate = round((expired / total) * 100) if total > 0 else 0
 
-        # --- Days to 10 ---
         weekly_growth = new_signups_7d
         days_to_10 = (
             max(0, round(((10 - total) / (weekly_growth / 7))))
@@ -626,10 +557,8 @@ class Analyzer:
             else 0 if total >= 10 else 999
         )
 
-        # --- Projected MRR ---
         projected_mrr = ((standard + 5) * 19) + ((pro + 2) * 39) + ((premium + 1) * 59)
 
-        # --- Side Hustle ---
         side_revenue = sum(
             s.get("amount", 0) or 0
             for s in side_hustle
@@ -637,7 +566,6 @@ class Analyzer:
         )
         side_completed = sum(1 for s in side_hustle if s.get("status") == "sold")
 
-        # --- WhatsApp ---
         whatsapp_sorted = sorted(
             whatsapp_stats,
             key=lambda w: (
@@ -650,7 +578,6 @@ class Analyzer:
         w_members = whatsapp_sorted[0].get("members", 0) if whatsapp_sorted else 0
         w_referrals = whatsapp_sorted[0].get("referrals", 0) if whatsapp_sorted else 0
 
-        # --- Honeypot ---
         honeypot_recent = 0
         for h in honeypot_logs:
             ts = h.get("timestamp")
@@ -667,11 +594,9 @@ class Analyzer:
                 except (ValueError, TypeError, AttributeError):
                     pass
 
-        # --- Email usage ---
         email_used = total_bookings + approved_b
         email_percent = min(100, round((email_used / 200) * 100))
 
-        # --- Health score ---
         health_score = (
             min(20, (total / 10) * 20 if total < 10 else 20) +
             min(30, (active / 5) * 30 if active < 5 else 30) +
@@ -691,26 +616,16 @@ class Analyzer:
         else:
             health_label = "EXCELLENT"
 
-        # --- Pending payments ---
         pending_payments = [
             p for p in payments
             if p.get("status") in ("awaiting_payment", "evidence_sent")
         ]
         pending_total = sum(p.get("amount", 0) or 0 for p in pending_payments)
 
-        # --- Anomalies ---
         anomalies = self.detect_anomalies(artists, bookings, email_used)
-
-        # --- Trends ---
         trend_data = self.detect_trends(snapshots)
-
-        # --- Cohorts ---
         cohort_data = self.analyze_cohorts(artists)
-
-        # --- Funnel ---
         funnel_data = self.analyze_funnel(artists, outreach_logs)
-
-        # --- Correlations ---
         correlation_data = self.discover_correlations(snapshots)
 
         return {
@@ -753,7 +668,4 @@ class Analyzer:
             "funnel": funnel_data,
             "correlations": correlation_data,
             "lastUpdated": now.isoformat(),
-        }
-
-
-
+            }
