@@ -1,454 +1,437 @@
-"""
-InkFlow Task Scheduler
-Daily briefings, weekly reports, monthly reviews, health checks, competitor monitoring
-"""
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from datetime import datetime, timedelta
-from typing import Dict, List
-import json
-import asyncio
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
 
 from config import (
-    SCHEDULE_DAILY_BRIEFING, SCHEDULE_WEEKLY_REPORT, 
-    SCHEDULE_MONTHLY_REVIEW, SCHEDULE_HEALTH_CHECK,
-    SCHEDULE_COMPETITOR_CHECK, ANOMALY_CONFIG
+    SCHEDULE_DAILY_BRIEFING_HOUR,
+    SCHEDULE_DAILY_BRIEFING_MINUTE,
+    SCHEDULE_WEEKLY_REPORT_DAY,
+    SCHEDULE_WEEKLY_REPORT_HOUR,
+    SCHEDULE_WEEKLY_REPORT_MINUTE,
+    SCHEDULE_MONTHLY_REVIEW_DAY,
+    SCHEDULE_MONTHLY_REVIEW_HOUR,
+    SCHEDULE_MONTHLY_REVIEW_MINUTE,
+    SCHEDULE_HEALTH_CHECK_INTERVAL_HOURS,
+    SCHEDULE_COMPETITOR_CHECK_DAY,
+    SCHEDULE_COMPETITOR_CHECK_HOUR,
+    SCHEDULE_COMPETITOR_CHECK_MINUTE,
+    SCHEDULE_DAILY_SNAPSHOT_HOUR,
+    SCHEDULE_DAILY_SNAPSHOT_MINUTE,
+    PRICING,
+    ANOMALY_NO_BOOKINGS_HOURS,
+    ANOMALY_EMAIL_USAGE_PERCENT,
+    ANOMALY_NO_SIGNUPS_DAYS,
 )
-from db.firebase_client import firebase_client
-from db.database import local_db
 
-# ML imports wrapped in try/except — will work when dependencies are added
-try:
-    from engine.ml_engine import ml_engine
-except ImportError:
-    ml_engine = None
-
-try:
-    from engine.analysis_engine import analysis_engine
-except ImportError:
-    analysis_engine = None
-
-try:
-    from engine.ai_enhancer import ai_enhancer
-except ImportError:
-    ai_enhancer = None
 
 class TaskScheduler:
-    """Manages all scheduled tasks for InkFlow"""
-    
+    """Manages all scheduled tasks using APScheduler with explicit CronTrigger."""
+
     def __init__(self):
         self.scheduler = BackgroundScheduler()
-        self.task_history = []
-        self._setup_jobs()
-    
-    def _setup_jobs(self):
-        """Configure all scheduled jobs"""
-        
-        # Daily briefing at 8 AM
+        self._running = False
+
+    def start(self) -> None:
+        """Start all scheduled jobs."""
+        if self._running:
+            return
+
+        # Daily briefing — every day at configured time
         self.scheduler.add_job(
-            self.daily_briefing,
-            CronTrigger.from_crontab(f"0 {SCHEDULE_DAILY_BRIEFING.replace(':',' ')} * * *"),
-            id='daily_briefing',
-            name='Daily Business Briefing'
+            self._daily_briefing,
+            CronTrigger(
+                hour=SCHEDULE_DAILY_BRIEFING_HOUR,
+                minute=SCHEDULE_DAILY_BRIEFING_MINUTE,
+            ),
+            id="daily_briefing",
+            name="Daily Briefing",
+            replace_existing=True,
         )
-        
-        # Weekly report Sunday at 6 PM
-        hour, minute = SCHEDULE_WEEKLY_REPORT.split('@')[1].split(':')
+
+        # Weekly report — Sunday at configured time
         self.scheduler.add_job(
-            self.weekly_report,
-            CronTrigger.from_crontab(f"{minute} {hour} * * 0"),
-            id='weekly_report',
-            name='Weekly Performance Report'
+            self._weekly_report,
+            CronTrigger(
+                day_of_week=SCHEDULE_WEEKLY_REPORT_DAY,
+                hour=SCHEDULE_WEEKLY_REPORT_HOUR,
+                minute=SCHEDULE_WEEKLY_REPORT_MINUTE,
+            ),
+            id="weekly_report",
+            name="Weekly Report",
+            replace_existing=True,
         )
-        
-        # Monthly review on the 1st at 9 AM
+
+        # Monthly review — 1st of month at configured time
         self.scheduler.add_job(
-            self.monthly_review,
-            CronTrigger.from_crontab(f"0 9 1 * *"),
-            id='monthly_review',
-            name='Monthly Business Review'
+            self._monthly_review,
+            CronTrigger(
+                day=SCHEDULE_MONTHLY_REVIEW_DAY,
+                hour=SCHEDULE_MONTHLY_REVIEW_HOUR,
+                minute=SCHEDULE_MONTHLY_REVIEW_MINUTE,
+            ),
+            id="monthly_review",
+            name="Monthly Review",
+            replace_existing=True,
         )
-        
-        # Health check every 6 hours
+
+        # Health check — every N hours
         self.scheduler.add_job(
-            self.health_check,
-            CronTrigger.from_crontab(f"0 */6 * * *"),
-            id='health_check',
-            name='System Health Check'
+            self._health_check,
+            CronTrigger(hour=f"*/{SCHEDULE_HEALTH_CHECK_INTERVAL_HOURS}"),
+            id="health_check",
+            name="Health Check",
+            replace_existing=True,
         )
-        
-        # Competitor check every Monday at 10 AM
+
+        # Competitor check — Monday at configured time
         self.scheduler.add_job(
-            self.competitor_check,
-            CronTrigger.from_crontab(f"0 10 * * 1"),
-            id='competitor_check',
-            name='Competitor Monitoring'
+            self._competitor_check,
+            CronTrigger(
+                day_of_week=SCHEDULE_COMPETITOR_CHECK_DAY,
+                hour=SCHEDULE_COMPETITOR_CHECK_HOUR,
+                minute=SCHEDULE_COMPETITOR_CHECK_MINUTE,
+            ),
+            id="competitor_check",
+            name="Competitor Check",
+            replace_existing=True,
         )
-        
-        # ML model retraining daily at 2 AM (only if ML is available)
-        if ml_engine:
-            self.scheduler.add_job(
-                self.retrain_models,
-                CronTrigger.from_crontab(f"0 2 * * *"),
-                id='retrain_models',
-                name='ML Model Retraining'
-            )
-        
-        # Snapshot every day at midnight
+
+        # Daily snapshot — midnight
         self.scheduler.add_job(
-            self.take_daily_snapshot,
-            CronTrigger.from_crontab(f"0 0 * * *"),
-            id='daily_snapshot',
-            name='Daily Metrics Snapshot'
+            self._daily_snapshot,
+            CronTrigger(
+                hour=SCHEDULE_DAILY_SNAPSHOT_HOUR,
+                minute=SCHEDULE_DAILY_SNAPSHOT_MINUTE,
+            ),
+            id="daily_snapshot",
+            name="Daily Snapshot",
+            replace_existing=True,
         )
-    
-    def start(self):
-        """Start the scheduler"""
+
         self.scheduler.start()
-        print("✅ Scheduler started — all tasks configured")
-        self.log_task("scheduler_started", "All scheduled tasks activated")
-    
-    def stop(self):
-        """Stop the scheduler"""
-        self.scheduler.shutdown()
-    
-    def get_status(self) -> Dict:
-        """Get status of all scheduled jobs"""
+        self._running = True
+        print("✅ Scheduler started — 6 jobs registered")
+
+    def stop(self) -> None:
+        """Stop the scheduler."""
+        if self._running:
+            self.scheduler.shutdown(wait=False)
+            self._running = False
+            print("🛑 Scheduler stopped")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get status of all scheduled jobs."""
         jobs = []
         for job in self.scheduler.get_jobs():
             jobs.append({
                 "id": job.id,
                 "name": job.name,
-                "next_run": str(job.next_run_time) if job.next_run_time else None,
-                "trigger": str(job.trigger)
+                "nextRun": job.next_run_time.isoformat() if job.next_run_time else None,
             })
-        
         return {
-            "active_jobs": len(jobs),
+            "running": self._running,
+            "jobCount": len(jobs),
             "jobs": jobs,
-            "recent_tasks": self.task_history[-10:]
         }
-    
-    def trigger_task(self, task_id: str) -> Dict:
-        """Manually trigger a scheduled task"""
+
+    def trigger_task(self, task_name: str) -> Dict[str, Any]:
+        """Manually trigger a task by name."""
         task_map = {
-            'daily_briefing': self.daily_briefing,
-            'weekly_report': self.weekly_report,
-            'monthly_review': self.monthly_review,
-            'health_check': self.health_check,
-            'competitor_check': self.competitor_check,
-            'daily_snapshot': self.take_daily_snapshot
+            "daily_briefing": self._daily_briefing,
+            "weekly_report": self._weekly_report,
+            "monthly_review": self._monthly_review,
+            "health_check": self._health_check,
+            "competitor_check": self._competitor_check,
+            "daily_snapshot": self._daily_snapshot,
         }
-        if ml_engine:
-            task_map['retrain_models'] = self.retrain_models
-        
-        if task_id in task_map:
-            result = task_map[task_id]()
-            return {"status": "completed", "task": task_id, "result": result}
-        
-        return {"status": "error", "message": f"Unknown task: {task_id}"}
-    
-    def log_task(self, task_name: str, details: str):
-        """Log a task execution"""
-        self.task_history.append({
-            "task": task_name,
-            "details": details,
-            "timestamp": datetime.now().isoformat()
-        })
-        if len(self.task_history) > 100:
-            self.task_history = self.task_history[-100:]
-    
+
+        func = task_map.get(task_name)
+        if not func:
+            return {"success": False, "error": f"Unknown task: {task_name}"}
+
+        try:
+            result = func()
+            return {"success": True, "task": task_name, "result": result}
+        except Exception as e:
+            return {"success": False, "task": task_name, "error": str(e)}
+
     # ========== TASK IMPLEMENTATIONS ==========
-    
-    def daily_briefing(self) -> Dict:
-        """Generate daily business briefing"""
-        print("📋 Generating daily briefing...")
-        
+
+    def _daily_briefing(self) -> Dict[str, Any]:
+        """
+        Daily briefing: fetch data, run analysis, save snapshot.
+        Runs every day at 8:00 AM.
+        """
+        print(f"📋 Running daily briefing — {datetime.now(timezone.utc).isoformat()}")
         try:
-            artists = firebase_client.get_all_artists()
-            bookings = firebase_client.get_all_bookings()
-            outreach = firebase_client.get_outreach_logs(100)
-            
-            total = len(artists)
-            active = len([a for a in artists if a.get('status') == 'active'])
-            trial = len([a for a in artists if a.get('status') == 'trial'])
-            
-            standard = len([a for a in artists if a.get('tier', 'standard') == 'standard' and a.get('status') == 'active'])
-            pro = len([a for a in artists if a.get('tier') == 'pro' and a.get('status') == 'active'])
-            premium = len([a for a in artists if a.get('tier') == 'premium' and a.get('status') == 'active'])
-            mrr = (standard * 19) + (pro * 39) + (premium * 59)
-            
-            now = datetime.now()
-            today_start = now.replace(hour=0, minute=0, second=0)
-            
-            bookings_today = len([b for b in bookings if b.get('createdAt') and 
-                                 hasattr(b['createdAt'], 'timestamp') and 
-                                 datetime.fromtimestamp(b['createdAt'].timestamp()) >= today_start])
-            
-            outreach_today = len([o for o in outreach if o.get('createdAt') and
-                                 hasattr(o['createdAt'], 'timestamp') and
-                                 datetime.fromtimestamp(o['createdAt'].timestamp()) >= today_start])
-            
-            # Detect anomalies (only if ML available)
-            anomalies = []
-            if ml_engine:
-                metrics = {
-                    "totalBookings": len(bookings),
-                    "bookings7d": len([b for b in bookings if b.get('createdAt') and 
-                                      hasattr(b['createdAt'], 'timestamp') and
-                                      datetime.fromtimestamp(b['createdAt'].timestamp()) >= now - timedelta(days=7)]),
-                    "dmsSent": len([o for o in outreach if o.get('action') == 'dm_sent']),
-                    "repliesReceived": len([o for o in outreach if o.get('action') == 'reply_received'])
-                }
-                history = local_db.get_metrics_history(30)
-                anomalies = ml_engine.detect_anomalies(metrics, history)
-            
-            briefing = {
-                "date": now.strftime("%Y-%m-%d"),
+            from db.firebase_client import get_firebase_client
+            from engine.analyzer import Analyzer
+
+            fb = get_firebase_client()
+            analyzer = Analyzer()
+
+            # Fetch all data
+            artists = fb.get_all_artists()
+            bookings = fb.get_all_bookings()
+            outreach_logs = fb.get_outreach_logs()
+            payments = fb.get_pending_payments()
+            whatsapp = fb.get_whatsapp_stats()
+            side_hustle = fb.get_side_hustle()
+            honeypot = fb.get_honeypot_logs()
+            snapshots = fb.get_daily_snapshots()
+
+            # Run analysis
+            dashboard = analyzer.analyze_dashboard(
+                artists=artists,
+                bookings=bookings,
+                outreach_logs=outreach_logs,
+                payments=payments,
+                whatsapp_stats=whatsapp,
+                side_hustle=side_hustle,
+                honeypot_logs=honeypot,
+                snapshots=snapshots,
+            )
+
+            # Save snapshot to Firestore
+            fb.save_snapshot({
                 "type": "daily_briefing",
-                "summary": {
-                    "total_artists": total,
-                    "active_artists": active,
-                    "trial_artists": trial,
-                    "mrr": mrr,
-                    "bookings_today": bookings_today,
-                    "outreach_today": outreach_today
-                },
-                "anomalies": anomalies,
-                "recommendations": self._generate_daily_recommendations(metrics if ml_engine else {}, anomalies),
-                "generated_at": now.isoformat()
-            }
-            
-            local_db.save_report('daily_briefing', briefing)
-            firebase_client.save_report(briefing)
-            
-            self.log_task("daily_briefing", f"Generated — {total} artists, ${mrr} MRR")
-            return briefing
-            
+                "metrics": dashboard,
+                "generatedAt": datetime.now(timezone.utc).isoformat(),
+            })
+
+            print(f"✅ Daily briefing complete — {dashboard['totalArtists']} artists, ${dashboard['mrr']} MRR")
+            return {"status": "completed", "metrics": dashboard}
+
         except Exception as e:
-            self.log_task("daily_briefing", f"Error: {str(e)}")
-            return {"error": str(e)}
-    
-    def _generate_daily_recommendations(self, metrics: Dict, anomalies: List[Dict]) -> List[str]:
-        """Generate actionable daily recommendations"""
-        recommendations = []
-        
-        dms = metrics.get('dmsSent', 0) if metrics else 0
-        if dms == 0:
-            recommendations.append("🚨 No outreach recorded recently — send at least 5 DMs today")
-        
-        if anomalies:
-            for anomaly in anomalies:
-                if anomaly.get('metric') == 'bookings_48h':
-                    recommendations.append("⚠️ No bookings in 48 hours — check if artists are sharing their booking links")
-        
-        if not recommendations:
-            recommendations.append("✅ Metrics look stable — maintain consistent outreach and follow up with trial users")
-            recommendations.append("📝 Consider logging your outreach actions to improve ML predictions")
-        
-        return recommendations
-    
-    def weekly_report(self) -> Dict:
-        """Generate comprehensive weekly report"""
-        print("📊 Generating weekly report...")
-        
+            print(f"❌ Daily briefing failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _weekly_report(self) -> Dict[str, Any]:
+        """
+        Weekly report: comprehensive analysis of the week.
+        Runs every Sunday at 6:00 PM.
+        """
+        print(f"📊 Running weekly report — {datetime.now(timezone.utc).isoformat()}")
         try:
-            artists = firebase_client.get_all_artists()
-            bookings = firebase_client.get_all_bookings()
-            outreach = firebase_client.get_outreach_logs(500)
-            history = local_db.get_metrics_history(7)
-            
-            # Run analysis if available
-            analysis = {}
-            if analysis_engine:
-                analysis = analysis_engine.full_analysis(artists, bookings, outreach, history)
-            
-            # Retrain models if available
-            ml_results = {}
-            if ml_engine:
-                ml_results = ml_engine.retrain_all(artists, bookings, outreach)
-            
-            report = {
-                "date": datetime.now().strftime("%Y-%m-%d"),
+            from db.firebase_client import get_firebase_client
+            from engine.analyzer import Analyzer
+
+            fb = get_firebase_client()
+            analyzer = Analyzer()
+
+            artists = fb.get_all_artists()
+            bookings = fb.get_all_bookings()
+            outreach_logs = fb.get_outreach_logs(limit=500)
+            payments = fb.get_pending_payments()
+            whatsapp = fb.get_whatsapp_stats()
+            side_hustle = fb.get_side_hustle()
+            honeypot = fb.get_honeypot_logs()
+            snapshots = fb.get_daily_snapshots(limit=7)
+
+            dashboard = analyzer.analyze_dashboard(
+                artists=artists,
+                bookings=bookings,
+                outreach_logs=outreach_logs,
+                payments=payments,
+                whatsapp_stats=whatsapp,
+                side_hustle=side_hustle,
+                honeypot_logs=honeypot,
+                snapshots=snapshots,
+            )
+
+            # Add weekly-specific data
+            churn_risks = []
+            for artist in artists:
+                risk = analyzer.predict_churn(artist)
+                if risk["risk"] in ("High", "Medium"):
+                    churn_risks.append({
+                        "artistId": artist.get("id"),
+                        "artistName": artist.get("name", "Unknown"),
+                        "risk": risk["risk"],
+                        "riskScore": risk["riskScore"],
+                        "factors": risk["factors"],
+                    })
+
+            weekly_data = {
                 "type": "weekly_report",
-                "week": datetime.now().strftime("%Y-W%W"),
-                "analysis": analysis,
-                "ml_retraining": ml_results,
-                "generated_at": datetime.now().isoformat()
+                "metrics": dashboard,
+                "churnRisks": churn_risks[:10],  # Top 10 at-risk
+                "generatedAt": datetime.now(timezone.utc).isoformat(),
             }
-            
-            local_db.save_report('weekly_report', report)
-            firebase_client.save_report(report)
-            
-            self.log_task("weekly_report", f"Week {report['week']} complete")
-            return report
-            
+
+            fb.save_report("weekly", weekly_data)
+            fb.save_snapshot({"type": "weekly_report", "metrics": dashboard})
+
+            print(f"✅ Weekly report complete — {len(churn_risks)} artists at risk")
+            return {"status": "completed", "metrics": dashboard, "churnRisks": len(churn_risks)}
+
         except Exception as e:
-            self.log_task("weekly_report", f"Error: {str(e)}")
-            return {"error": str(e)}
-    
-    def monthly_review(self) -> Dict:
-        """Generate monthly business review"""
-        print("📈 Generating monthly review...")
-        
+            print(f"❌ Weekly report failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _monthly_review(self) -> Dict[str, Any]:
+        """
+        Monthly review: deep analysis with trends and projections.
+        Runs 1st of each month at 9:00 AM.
+        """
+        print(f"📈 Running monthly review — {datetime.now(timezone.utc).isoformat()}")
         try:
-            artists = firebase_client.get_all_artists()
-            bookings = firebase_client.get_all_bookings()
-            outreach = firebase_client.get_outreach_logs(1000)
-            history = local_db.get_metrics_history(30)
-            
-            cohorts = {}
-            funnel = {}
-            trends = {}
-            
-            if analysis_engine:
-                cohorts = analysis_engine.cohort_analysis(artists, bookings)
-                funnel = analysis_engine.funnel_analysis(artists, outreach, bookings)
-                trends = analysis_engine.detect_trends(history)
-            
-            month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0)
-            new_this_month = len([a for a in artists if a.get('createdAt') and
-                                 hasattr(a['createdAt'], 'timestamp') and
-                                 datetime.fromtimestamp(a['createdAt'].timestamp()) >= month_start])
-            
-            active = len([a for a in artists if a.get('status') == 'active'])
-            standard = len([a for a in artists if a.get('tier', 'standard') == 'standard' and a.get('status') == 'active'])
-            pro = len([a for a in artists if a.get('tier') == 'pro' and a.get('status') == 'active'])
-            premium = len([a for a in artists if a.get('tier') == 'premium' and a.get('status') == 'active'])
-            
-            review = {
-                "date": datetime.now().strftime("%Y-%m-%d"),
+            from db.firebase_client import get_firebase_client
+            from engine.analyzer import Analyzer
+
+            fb = get_firebase_client()
+            analyzer = Analyzer()
+
+            artists = fb.get_all_artists()
+            bookings = fb.get_all_bookings()
+            outreach_logs = fb.get_outreach_logs(limit=1000)
+            payments = fb.get_pending_payments()
+            whatsapp = fb.get_whatsapp_stats()
+            side_hustle = fb.get_side_hustle()
+            honeypot = fb.get_honeypot_logs()
+            snapshots = fb.get_daily_snapshots(limit=30)
+
+            dashboard = analyzer.analyze_dashboard(
+                artists=artists,
+                bookings=bookings,
+                outreach_logs=outreach_logs,
+                payments=payments,
+                whatsapp_stats=whatsapp,
+                side_hustle=side_hustle,
+                honeypot_logs=honeypot,
+                snapshots=snapshots,
+            )
+
+            # Monthly-specific: full cohort + correlation analysis
+            cohorts = analyzer.analyze_cohorts(artists)
+            correlations = analyzer.discover_correlations(snapshots)
+
+            monthly_data = {
                 "type": "monthly_review",
-                "month": datetime.now().strftime("%Y-%m"),
-                "growth": {
-                    "new_artists_this_month": new_this_month,
-                    "total_artists": len(artists),
-                    "active_artists": active,
-                    "mrr": (standard * 19) + (pro * 39) + (premium * 59),
-                    "total_bookings": len(bookings)
-                },
+                "metrics": dashboard,
                 "cohorts": cohorts,
-                "funnel": funnel,
-                "trends": trends,
-                "generated_at": datetime.now().isoformat()
+                "correlations": correlations,
+                "generatedAt": datetime.now(timezone.utc).isoformat(),
             }
-            
-            local_db.save_report('monthly_review', review)
-            firebase_client.save_report(review)
-            
-            self.log_task("monthly_review", f"Month {review['month']} review complete")
-            return review
-            
+
+            fb.save_report("monthly", monthly_data)
+            fb.save_snapshot({"type": "monthly_review", "metrics": dashboard})
+
+            print(f"✅ Monthly review complete")
+            return {"status": "completed", "metrics": dashboard}
+
         except Exception as e:
-            self.log_task("monthly_review", f"Error: {str(e)}")
-            return {"error": str(e)}
-    
-    def health_check(self) -> Dict:
-        """Run system health check"""
-        print("❤️ Running health check...")
-        
+            print(f"❌ Monthly review failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _health_check(self) -> Dict[str, Any]:
+        """
+        Health check: quick check for anomalies.
+        Runs every 6 hours.
+        """
+        print(f"❤️ Running health check — {datetime.now(timezone.utc).isoformat()}")
         try:
-            artists = firebase_client.get_all_artists()
-            bookings = firebase_client.get_all_bookings()
-            
-            checks = {
-                "firebase_connection": len(artists) >= 0,
-                "data_integrity": len(artists) >= 0 and len(bookings) >= 0,
-                "database_size": {
-                    "artists": len(artists),
-                    "bookings": len(bookings)
-                }
-            }
-            
-            health = {
-                "timestamp": datetime.now().isoformat(),
-                "status": "healthy",
-                "checks": checks,
-                "uptime": "Running"
-            }
-            
-            local_db.save_report('health_check', health)
-            
-            return health
-            
-        except Exception as e:
+            from db.firebase_client import get_firebase_client
+            from engine.analyzer import Analyzer
+
+            fb = get_firebase_client()
+            analyzer = Analyzer()
+
+            artists = fb.get_all_artists()
+            bookings = fb.get_all_bookings()
+
+            # Quick anomaly check
+            total_bookings = len(bookings)
+            approved = sum(1 for b in bookings if b.get("status") == "approved")
+            email_used = total_bookings + approved
+
+            anomalies = analyzer.detect_anomalies(artists, bookings, email_used)
+
+            if anomalies:
+                print(f"⚠️ Health check: {len(anomalies)} anomalies found")
+                for a in anomalies:
+                    print(f"  - {a['type']}: {a['description']}")
+
             return {
-                "timestamp": datetime.now().isoformat(),
-                "status": "error",
-                "error": str(e)
+                "status": "completed",
+                "anomalies": len(anomalies),
+                "details": anomalies,
             }
-    
-    def competitor_check(self) -> Dict:
-        """Monitor competitor changes"""
-        print("🔍 Checking competitors...")
-        
-        competitors = [
-            {"name": "SlidInk", "url": "https://www.slidink.com"},
-            {"name": "INKFLO", "url": "https://www.inkflo.app"},
-            {"name": "InkFlow Studio", "url": "https://www.inkflowstudio.app"},
-            {"name": "Keep the Fees", "url": "https://keepthefees.com"}
-        ]
-        
-        results = []
-        for comp in competitors:
-            results.append({
-                "name": comp["name"],
-                "url": comp["url"],
-                "checked_at": datetime.now().isoformat(),
-                "status": "Website accessible (manual review recommended)"
-            })
-        
-        report = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "type": "competitor_check",
-            "competitors": results,
-            "generated_at": datetime.now().isoformat()
+
+        except Exception as e:
+            print(f"❌ Health check failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _competitor_check(self) -> Dict[str, Any]:
+        """
+        Competitor check: placeholder for manual competitor monitoring.
+        Runs every Monday at 10:00 AM.
+        """
+        print(f"🔍 Running competitor check — {datetime.now(timezone.utc).isoformat()}")
+        from config import BUSINESS_CONTEXT
+
+        competitors = BUSINESS_CONTEXT.get("competitors", {})
+        comp_names = list(competitors.keys())
+
+        return {
+            "status": "completed",
+            "competitorsMonitored": len(comp_names),
+            "competitors": comp_names,
+            "note": "Manual review recommended — check competitor websites for changes",
         }
-        
-        local_db.save_report('competitor_check', report)
-        self.log_task("competitor_check", f"Checked {len(competitors)} competitors")
-        
-        return report
-    
-    def retrain_models(self) -> Dict:
-        """Retrain all ML models"""
-        if not ml_engine:
-            return {"status": "skipped", "reason": "ML engine not available"}
-        
-        print("🤖 Retraining ML models...")
-        
+
+    def _daily_snapshot(self) -> Dict[str, Any]:
+        """
+        Daily snapshot: capture current metrics at midnight.
+        """
+        print(f"📸 Taking daily snapshot — {datetime.now(timezone.utc).isoformat()}")
         try:
-            artists = firebase_client.get_all_artists()
-            bookings = firebase_client.get_all_bookings()
-            outreach = firebase_client.get_outreach_logs(1000)
-            
-            results = ml_engine.retrain_all(artists, bookings, outreach)
-            
-            self.log_task("retrain_models", f"Retrained — {results.get('total_artists', 0)} artists")
-            return results
-            
-        except Exception as e:
-            self.log_task("retrain_models", f"Error: {str(e)}")
-            return {"error": str(e)}
-    
-    def take_daily_snapshot(self) -> Dict:
-        """Take daily metrics snapshot"""
-        try:
-            snapshot = firebase_client.take_snapshot()
-            
-            local_db.save_daily_metrics({
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                **snapshot
+            from db.firebase_client import get_firebase_client
+            from engine.analyzer import Analyzer
+
+            fb = get_firebase_client()
+            analyzer = Analyzer()
+
+            artists = fb.get_all_artists()
+            bookings = fb.get_all_bookings()
+            outreach_logs = fb.get_outreach_logs(limit=50)
+            payments = fb.get_pending_payments()
+            whatsapp = fb.get_whatsapp_stats()
+            side_hustle = fb.get_side_hustle()
+            honeypot = fb.get_honeypot_logs(limit=10)
+            snapshots = fb.get_daily_snapshots(limit=7)
+
+            dashboard = analyzer.analyze_dashboard(
+                artists=artists,
+                bookings=bookings,
+                outreach_logs=outreach_logs,
+                payments=payments,
+                whatsapp_stats=whatsapp,
+                side_hustle=side_hustle,
+                honeypot_logs=honeypot,
+                snapshots=snapshots,
+            )
+
+            fb.save_snapshot({
+                "type": "daily_snapshot",
+                "metrics": dashboard,
             })
-            
-            self.log_task("daily_snapshot", f"Saved — {snapshot.get('totalArtists', 0)} artists")
-            return snapshot
-            
+
+            return {"status": "completed", "metrics": dashboard}
+
         except Exception as e:
-            self.log_task("daily_snapshot", f"Error: {str(e)}")
-            return {"error": str(e)}
+            print(f"❌ Daily snapshot failed: {e}")
+            return {"status": "failed", "error": str(e)}
 
 
-# Singleton instance
-task_scheduler = TaskScheduler()
+# ========== MODULE-LEVEL SINGLETON ==========
+_scheduler: Optional[TaskScheduler] = None
+
+
+def get_scheduler() -> TaskScheduler:
+    """Get or create the scheduler singleton."""
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = TaskScheduler()
+    return _scheduler
