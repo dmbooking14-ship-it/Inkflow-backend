@@ -754,23 +754,8 @@ class Analyzer:
             "correlations": correlation_data,
             "lastUpdated": now.isoformat(),
         }
-```
 
----
 
-What this does:
 
-· 8 analysis methods, all pure Python + numpy — zero ML libraries
-· score_lead() — weights followers, booking method, status, priority
-· predict_churn() — checks trial expiry, inactivity, no bookings
-· grade_message() — scores A-F on length, personalization, questions, spam triggers
-· detect_anomalies() — flags no bookings 48h, email >80%, no signups 7d
-· analyze_cohorts() — groups artists by signup week, calculates retention
-· analyze_funnel() — DM → Reply → Signup → Active conversion rates
-· detect_trends() — numpy linear regression on 6 metrics
-· discover_correlations() — numpy correlation between metric pairs
-· analyze_dashboard() — full dashboard output matching your frontend exactly (same field names, same health score formula)
-
----
 
 Approve this and I'll write File #8: engine/ai_enhancer.py
