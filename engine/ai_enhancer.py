@@ -1,257 +1,390 @@
-"""
-InkFlow AI Enhancement Layer
-Prompt optimization, multi-step reasoning, context building, response caching
-"""
-
 import httpx
-import json
-from datetime import datetime
-from typing import Dict, List, Optional
+import hashlib
+import time
+from typing import Dict, Any, List, Optional
 from config import (
-    GEMINI_API_KEYS, GEMINI_MODEL_FLASH, GEMINI_MODEL_PRO, 
-    GEMINI_API_URL, BUSINESS_CONTEXT
+    GEMINI_API_KEYS,
+    DEEPSEEK_API_KEYS,
+    OPENROUTER_API_KEY,
+    GEMINI_MODEL_FLASH,
+    GEMINI_MODEL_PRO,
+    DEEPSEEK_MODEL,
+    GEMINI_ENDPOINT,
+    DEEPSEEK_ENDPOINT,
+    OPENROUTER_ENDPOINT,
+    BUSINESS_CONTEXT,
+    GEMINI_CACHE_TTL_SECONDS,
+    MAX_CACHE_ENTRIES,
+    PRICING,
 )
-from db.database import local_db
+
 
 class AIEnhancer:
-    """Enhances AI interactions with caching, context, and optimization"""
-    
+    """Multi-provider AI with caching, key rotation, and failover."""
+
     def __init__(self):
-        self.current_key_index = 0
-        self.call_history = []
-    
-    # ========== GEMINI API CALL ==========
-    
-    async def call_gemini(self, prompt: str, model: str = None, max_tokens: int = 800) -> Optional[str]:
-        """Call Gemini API with key rotation"""
-        model = model or GEMINI_MODEL_FLASH
-        
-        # Check cache first
-        cached = local_db.get_cached_response(prompt)
-        if cached:
-            return cached['response']
-        
-        # Check semantic cache
-        similar = local_db.search_similar_cache(prompt)
-        if similar:
-            return f"{similar['response']}\n\n💾 (Retrieved from similar cached response)"
-        
-        # Try each key
-        for attempt in range(len(GEMINI_API_KEYS)):
-            key_index = (self.current_key_index + attempt) % len(GEMINI_API_KEYS)
-            api_key = GEMINI_API_KEYS[key_index]
-            
-            url = GEMINI_API_URL.format(model=model, key=api_key)
-            
-            request_body = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.7,
-                    "maxOutputTokens": max_tokens
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._gemini_key_index = 0
+        self._deepseek_key_index = 0
+
+    # ========== CACHE ==========
+    def _cache_key(self, text: str, provider: str) -> str:
+        """Generate a cache key from text + provider."""
+        raw = f"{text.lower().strip()}_{provider}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def _cache_get(self, key: str) -> Optional[str]:
+        """Get cached response if not expired."""
+        entry = self._cache.get(key)
+        if entry:
+            age = time.time() - entry["timestamp"]
+            if age < GEMINI_CACHE_TTL_SECONDS:
+                entry["reuseCount"] = entry.get("reuseCount", 0) + 1
+                return entry["response"]
+            else:
+                del self._cache[key]
+        return None
+
+    def _cache_set(self, key: str, response: str) -> None:
+        """Store response in cache."""
+        # Limit cache size
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            oldest_key = min(
+                self._cache.keys(),
+                key=lambda k: self._cache[k]["timestamp"],
+            )
+            del self._cache[oldest_key]
+        self._cache[key] = {
+            "response": response,
+            "timestamp": time.time(),
+            "reuseCount": 0,
+        }
+
+    # ========== SYSTEM PROMPT ==========
+    def _build_system_prompt(self, mode: str = "general", dashboard_data: Optional[Dict] = None) -> str:
+        """Build optimized system prompt with business context and optional dashboard data."""
+        bc = BUSINESS_CONTEXT
+        prompt = (
+            f"You are InkFlow Assistant v6.0, built by {bc['founder']} for {bc['product']} "
+            f"— a SaaS booking platform for tattoo artists (pre-revenue, Stage 0). "
+            f"Current: {bc['primary_challenge']}. "
+            f"System 6 ready at {bc['system6_trigger']}. "
+            f"Pricing: ${PRICING['standard']}/${PRICING['pro']}/${PRICING['premium']}/mo. "
+        )
+
+        # Mode-specific instructions
+        mode_prompts = {
+            "analytics": "MODE: Analytics. Focus on data, metrics, numbers. Be precise and quantitative. ",
+            "outreach": "MODE: Outreach. Focus on drafting messages, tracking leads, follow-up strategy. ",
+            "strategy": "MODE: Strategy. Focus on business decisions, competitor analysis, growth tactics. Think long-term. ",
+            "coder": "MODE: Coder. Write production-ready code with error handling. Explain reasoning before code. No fluff. ",
+            "analyst": "MODE: Analyst. Structure: 1) KEY METRIC 2) TREND 3) INSIGHT 4) RECOMMENDATION. Be quantitative. ",
+            "general": "MODE: General. Be conversational and helpful across all topics. ",
+        }
+        prompt += mode_prompts.get(mode, mode_prompts["general"])
+
+        # Inject dashboard data if available
+        if dashboard_data:
+            prompt += (
+                f"LIVE DATA: {dashboard_data.get('totalArtists', 0)} artists, "
+                f"${dashboard_data.get('mrr', 0)} MRR, "
+                f"{dashboard_data.get('totalBookings', 0)} bookings, "
+                f"{dashboard_data.get('bookings7d', 0)} this week, "
+                f"{dashboard_data.get('dmsSent', 0)} DMs, "
+                f"{dashboard_data.get('healthScore', 0)}% health. "
+            )
+
+        prompt += "Be thorough. Complete all sentences. "
+        return prompt
+
+    # ========== GEMINI ==========
+    async def _call_gemini(
+        self,
+        user_text: str,
+        model: str = GEMINI_MODEL_FLASH,
+        mode: str = "general",
+        dashboard_data: Optional[Dict] = None,
+        image_base64: Optional[str] = None,
+    ) -> Optional[str]:
+        """Call Gemini API with key rotation."""
+        if not GEMINI_API_KEYS:
+            return None
+
+        system_prompt = self._build_system_prompt(mode, dashboard_data)
+        full_prompt = f"{system_prompt}\n\nUser: {user_text}"
+
+        # Build request body
+        parts = [{"text": full_prompt}]
+        if image_base64:
+            mime_type = "image/jpeg"
+            if "data:image/png" in image_base64:
+                mime_type = "image/png"
+            elif "data:image/gif" in image_base64:
+                mime_type = "image/gif"
+            base64_data = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64_data,
                 }
-            }
-            
+            })
+
+        body = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 800,
+            },
+        }
+
+        # Try each key
+        num_keys = len(GEMINI_API_KEYS)
+        for attempt in range(num_keys):
+            idx = (self._gemini_key_index + attempt) % num_keys
+            api_key = GEMINI_API_KEYS[idx]
+
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(url, json=request_body)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        reply = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                        
-                        if reply:
-                            # Cache the response
-                            local_db.cache_gemini_response(prompt, reply, model, max_tokens)
-                            self.current_key_index = key_index
-                            self.call_history.append({
-                                "timestamp": datetime.now().isoformat(),
-                                "model": model,
-                                "tokens": max_tokens,
-                                "key_index": key_index
-                            })
-                            return reply
-                    
-                    elif response.status_code == 429:
-                        # Rate limited, try next key
-                        continue
-                    
-            except Exception as e:
-                print(f"Gemini call error: {e}")
+                    resp = await client.post(
+                        f"{GEMINI_ENDPOINT}/{model}:generateContent?key={api_key}",
+                        json=body,
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts_list = candidates[0].get("content", {}).get("parts", [])
+                        if parts_list:
+                            reply = parts_list[0].get("text", "")
+                            if reply:
+                                self._gemini_key_index = idx
+                                return reply
+
+                elif resp.status_code == 429:
+                    # Rate limited — try next key
+                    continue
+                else:
+                    # Other error — try next key
+                    continue
+
+            except (httpx.TimeoutException, httpx.RequestError):
                 continue
-        
+
         return None
-    
-    # ========== PROMPT OPTIMIZATION ==========
-    
-    def build_optimized_prompt(self, user_query: str, context: Dict = None, mode: str = "general") -> str:
-        """Build an optimized prompt with all relevant context"""
-        
-        # Base system prompt
-        system_prompt = f"""You are InkFlow Assistant, an AI business advisor for {BUSINESS_CONTEXT['company']}.
-Founder: {BUSINESS_CONTEXT['founder']}
-Product: {BUSINESS_CONTEXT['product']}
-Stage: {BUSINESS_CONTEXT['current_stage']}
-Pricing: ${BUSINESS_CONTEXT['pricing']['standard']}/${BUSINESS_CONTEXT['pricing']['pro']}/${BUSINESS_CONTEXT['pricing']['premium']}/month
-Competitors: {', '.join(BUSINESS_CONTEXT['competitors'])}
-Vision: {BUSINESS_CONTEXT['vision']}
 
-"""
-        
-        # Add mode-specific instructions
-        mode_instructions = {
-            "analytics": "Focus on data, metrics, and quantitative analysis. Be precise with numbers.",
-            "outreach": "Focus on messaging, lead generation, and communication strategy.",
-            "strategy": "Focus on business decisions, competitive positioning, and growth tactics.",
-            "general": "Be conversational and helpful across all topics."
+    # ========== DEEPSEEK ==========
+    async def _call_deepseek(
+        self,
+        user_text: str,
+        mode: str = "general",
+        dashboard_data: Optional[Dict] = None,
+    ) -> Optional[str]:
+        """Call DeepSeek API with key rotation."""
+        if not DEEPSEEK_API_KEYS:
+            return None
+
+        system_prompt = self._build_system_prompt(mode, dashboard_data)
+        full_prompt = f"{system_prompt}\n\nUser: {user_text}"
+
+        body = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": full_prompt}],
+            "max_tokens": 1500,
         }
-        system_prompt += f"Mode: {mode}. {mode_instructions.get(mode, mode_instructions['general'])}\n\n"
-        
-        # Add dashboard context if available
-        if context and context.get('dashboard'):
-            d = context['dashboard']
-            system_prompt += f"""Current Dashboard Data:
-- {d.get('totalArtists', 0)} artists ({d.get('activeArtists', 0)} active)
-- MRR: ${d.get('mrr', 0)}
-- {d.get('totalBookings', 0)} total bookings ({d.get('bookings7d', 0)} this week)
-- {d.get('dmsSent', 0)} DMs sent ({d.get('replyRate', 0)}% reply rate)
-- Health: {d.get('healthScore', 0)}%
 
-"""
-        
-        # Add ML insights if available
-        if context and context.get('ml_insights'):
-            system_prompt += f"""ML Insights:
-- {context['ml_insights']}
+        num_keys = len(DEEPSEEK_API_KEYS)
+        for attempt in range(num_keys):
+            idx = (self._deepseek_key_index + attempt) % num_keys
+            api_key = DEEPSEEK_API_KEYS[idx]
 
-"""
-        
-        # Add conversation history summary
-        if context and context.get('recent_conversations'):
-            system_prompt += f"Recent conversation topics: {', '.join(context['recent_conversations'][:5])}\n\n"
-        
-        # Final prompt
-        full_prompt = f"{system_prompt}User Question: {user_query}\n\nProvide a thorough, actionable response. Complete all sentences. Be specific with numbers when available."
-        
-        return full_prompt
-    
-    # ========== MULTI-STEP REASONING ==========
-    
-    async def multi_step_analysis(self, question: str, dashboard_data: Dict) -> Dict:
-        """Perform multi-step reasoning for complex questions"""
-        
-        results = {
-            "question": question,
-            "steps": [],
-            "final_answer": None,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Step 1: Understand the question
-        step1_prompt = f"Analyze this business question about a SaaS startup: '{question}'. What specific data points and analysis would be needed to answer it thoroughly? Keep it brief."
-        step1_response = await self.call_gemini(step1_prompt, max_tokens=200)
-        results['steps'].append({"step": "question_analysis", "result": step1_response})
-        
-        # Step 2: Analyze the data
-        data_summary = json.dumps(dashboard_data, indent=2)[:2000]
-        step2_prompt = f"Here is the current dashboard data:\n{data_summary}\n\nBased on the question '{question}', what are the key findings from this data? Be specific with numbers."
-        step2_response = await self.call_gemini(step2_prompt, max_tokens=300)
-        results['steps'].append({"step": "data_analysis", "result": step2_response})
-        
-        # Step 3: Generate recommendations
-        step3_prompt = f"Question: {question}\n\nData findings: {step2_response}\n\nBased on this analysis, what are 3-5 specific, actionable recommendations for the founder? Prioritize by impact."
-        step3_response = await self.call_gemini(step3_prompt, max_tokens=400)
-        results['steps'].append({"step": "recommendations", "result": step3_response})
-        
-        # Step 4: Compile final answer
-        final_prompt = f"""Question: {question}
-
-Analysis: {step1_response}
-
-Data Findings: {step2_response}
-
-Recommendations: {step3_response}
-
-Combine all of this into one comprehensive, well-structured answer. Include:
-1. Brief analysis of the situation
-2. Key data points
-3. Actionable recommendations
-4. Next steps
-
-Be thorough but concise."""
-        
-        final_answer = await self.call_gemini(final_prompt, max_tokens=800)
-        results['final_answer'] = final_answer
-        
-        return results
-    
-    # ========== CONTEXT BUILDER ==========
-    
-    def build_context(self, firebase_client, local_db) -> Dict:
-        """Build comprehensive context for AI prompts"""
-        context = {}
-        
-        try:
-            # Get dashboard snapshot
-            from db.firebase_client import firebase_client as fc
-            snapshot = fc.take_snapshot()
-            context['dashboard'] = snapshot
-        except:
-            context['dashboard'] = {}
-        
-        try:
-            # Get ML insights
-            if local_db:
-                recent_predictions = local_db.get_predictions_for_training()
-                if recent_predictions:
-                    context['ml_insights'] = f"{len(recent_predictions)} predictions tracked"
-        except:
-            pass
-        
-        try:
-            # Get recent conversation topics
-            if local_db:
-                # This would query conversations table
-                context['recent_conversations'] = ["business metrics", "outreach strategy"]
-        except:
-            pass
-        
-        return context
-    
-    # ========== FALLBACK CHAIN ==========
-    
-    async def get_best_response(self, question: str, context: Dict = None) -> Dict:
-        """Try multiple AI approaches, return the best result"""
-        
-        # Try 1: Cached response
-        cached = local_db.get_cached_response(question)
-        if cached:
-            return {"response": cached['response'], "source": "cache", "model": cached.get('model_used', 'unknown')}
-        
-        # Try 2: Gemini Flash (fast, cheap)
-        flash_prompt = self.build_optimized_prompt(question, context, "general")
-        flash_response = await self.call_gemini(flash_prompt, model=GEMINI_MODEL_FLASH, max_tokens=600)
-        if flash_response:
-            return {"response": flash_response, "source": "gemini_flash", "model": GEMINI_MODEL_FLASH}
-        
-        # Try 3: Gemini Pro (smarter, more expensive)
-        pro_prompt = self.build_optimized_prompt(question, context, "general")
-        pro_response = await self.call_gemini(pro_prompt, model=GEMINI_MODEL_PRO, max_tokens=800)
-        if pro_response:
-            return {"response": pro_response, "source": "gemini_pro", "model": GEMINI_MODEL_PRO}
-        
-        # Try 4: Multi-step reasoning for complex questions
-        if len(question.split()) > 8:
             try:
-                dashboard_data = context.get('dashboard', {}) if context else {}
-                multi_step_result = await self.multi_step_analysis(question, dashboard_data)
-                if multi_step_result.get('final_answer'):
-                    return {"response": multi_step_result['final_answer'], "source": "multi_step", "model": GEMINI_MODEL_FLASH}
-            except:
-                pass
-        
-        # Fallback: Return None (caller should use offline brain)
-        return {"response": None, "source": "failed", "model": None}
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    resp = await client.post(
+                        DEEPSEEK_ENDPOINT,
+                        json=body,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        reply = choices[0].get("message", {}).get("content", "")
+                        if reply:
+                            self._deepseek_key_index = idx
+                            return reply
+
+                elif resp.status_code in (429, 500, 502, 503):
+                    continue
+                elif resp.status_code in (401, 402, 403):
+                    continue
+                else:
+                    continue
+
+            except (httpx.TimeoutException, httpx.RequestError):
+                continue
+
+        return None
+
+    # ========== OPENROUTER ==========
+    async def _call_openrouter(
+        self,
+        user_text: str,
+        mode: str = "general",
+        dashboard_data: Optional[Dict] = None,
+    ) -> Optional[str]:
+        """Call OpenRouter API (fallback provider)."""
+        if not OPENROUTER_API_KEY:
+            return None
+
+        system_prompt = self._build_system_prompt(mode, dashboard_data)
+        full_prompt = f"{system_prompt}\n\nUser: {user_text}"
+
+        body = {
+            "model": "deepseek/deepseek-chat",
+            "messages": [{"role": "user", "content": full_prompt}],
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(
+                    OPENROUTER_ENDPOINT,
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://inkflow.app",
+                        "Content-Type": "application/json",
+                    },
+                )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                choices = data.get("choices", [])
+                if choices:
+                    return choices[0].get("message", {}).get("content", "")
+
+        except (httpx.TimeoutException, httpx.RequestError):
+            pass
+
+        return None
+
+    # ========== FULL FAILOVER CHAIN ==========
+    async def generate_insight(
+        self,
+        user_text: str,
+        provider: str = "gemini",
+        model: str = "flash",
+        mode: str = "general",
+        dashboard_data: Optional[Dict] = None,
+        image_base64: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Main entry point with full failover chain:
+        Cache → Primary Provider → Secondary → Tertiary → None
+        """
+        # Check cache first
+        cache_key = self._cache_key(user_text, provider)
+        cached = self._cache_get(cache_key)
+        if cached:
+            return {
+                "response": cached,
+                "provider": provider,
+                "source": "cache",
+                "success": True,
+            }
+
+        gemini_model = GEMINI_MODEL_PRO if model == "pro" else GEMINI_MODEL_FLASH
+
+        # Image requests must use Gemini
+        if image_base64:
+            result = await self._call_gemini(
+                user_text, gemini_model, mode, dashboard_data, image_base64
+            )
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "gemini", "source": "api", "success": True}
+            return {"response": None, "provider": "gemini", "source": "none", "success": False}
+
+        # Try primary provider
+        if provider == "gemini":
+            result = await self._call_gemini(user_text, gemini_model, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "gemini", "source": "api", "success": True}
+            # Failover to DeepSeek
+            result = await self._call_deepseek(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "deepseek", "source": "failover", "success": True}
+            # Failover to OpenRouter
+            result = await self._call_openrouter(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "openrouter", "source": "failover", "success": True}
+
+        elif provider == "deepseek":
+            result = await self._call_deepseek(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "deepseek", "source": "api", "success": True}
+            # Failover to OpenRouter
+            result = await self._call_openrouter(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "openrouter", "source": "failover", "success": True}
+            # Failover to Gemini
+            result = await self._call_gemini(user_text, gemini_model, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "gemini", "source": "failover", "success": True}
+
+        elif provider == "openrouter":
+            result = await self._call_openrouter(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "openrouter", "source": "api", "success": True}
+            # Failover to DeepSeek
+            result = await self._call_deepseek(user_text, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "deepseek", "source": "failover", "success": True}
+            # Failover to Gemini
+            result = await self._call_gemini(user_text, gemini_model, mode, dashboard_data)
+            if result:
+                self._cache_set(cache_key, result)
+                return {"response": result, "provider": "gemini", "source": "failover", "success": True}
+
+        return {"response": None, "provider": provider, "source": "none", "success": False}
+
+    # ========== VISION-ONLY SHORTCUT ==========
+    async def analyze_image(
+        self,
+        image_base64: str,
+        prompt_text: str = "Describe this image in detail.",
+    ) -> Optional[str]:
+        """Analyze an image using Gemini Vision."""
+        result = await self._call_gemini(
+            user_text=prompt_text,
+            model=GEMINI_MODEL_FLASH,
+            mode="general",
+            dashboard_data=None,
+            image_base64=image_base64,
+        )
+        return result
 
 
-# Singleton instance
-ai_enhancer = AIEnhancer()
+# ========== MODULE-LEVEL SINGLETON ==========
+_ai_enhancer: Optional[AIEnhancer] = None
+
+
+def get_ai_enhancer() -> AIEnhancer:
+    """Get or create the AI enhancer singleton."""
+    global _ai_enhancer
+    if _ai_enhancer is None:
+        _ai_enhancer = AIEnhancer()
+    return _ai_enhancer
